@@ -1,4 +1,5 @@
 defmodule Jsont.DecodeTest do
+  use Snapshy
   use ExUnit.Case, async: true
   use ExUnitProperties
 
@@ -140,9 +141,9 @@ defmodule Jsont.DecodeTest do
     for path <- Path.wildcard("#{root}/y_*.json") do
       file = Path.basename(path, ".json")
 
-      test "#{file} passes" do
+      test_snapshot "#{file} passes" do
         data = File.read!(unquote(path))
-        parse!(data)
+        {data, parse!(data)}
       end
     end
 
