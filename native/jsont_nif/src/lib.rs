@@ -32,7 +32,7 @@ fn decode<'a>(env: Env<'a>, term: Term<'a>) -> (Atom, Term<'a>) {
             return (atom::error(), encode_error(env, Error::Rustler(e)));
         }
     };
-    match decoder::decode(env, binary.as_slice()) {
+    match decoder::decode(env, binary) {
         Ok(term) => (atom::ok(), term),
         Err(e) => (atom::error(), encode_error(env, e)),
     }

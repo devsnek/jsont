@@ -39,20 +39,31 @@ rustler::atoms! {
     invalid_big,
 }
 
+pub fn decode<'a>(env: Env<'a>, input: Binary<'a>) -> Result<Term<'a>, Error<'a>> {
+    let mut d = Decoder {
+        env,
+        input,
+        stack: Vec::with_capacity(16),
+        index: 0,
+        scratch: vec![],
+    };
+    d.decode()
+}
+
 enum Entry<'a> {
     Array(Term<'a>),
     Object(Vec<Term<'a>>, Vec<Term<'a>>),
 }
 
-struct Decoder<'a, 'b> {
+struct Decoder<'a> {
     env: Env<'a>,
     stack: Vec<Entry<'a>>,
-    input: &'b [u8],
+    input: Binary<'a>,
     index: usize,
     scratch: Vec<u8>,
 }
 
-impl<'a, 'b> Decoder<'a, 'b> {
+impl<'a> Decoder<'a> {
     fn decode(&mut self) -> Result<Term<'a>, Error<'a>> {
         loop {
             self.skip_whitespace();
@@ -384,22 +395,22 @@ impl<'a, 'b> Decoder<'a, 'b> {
             }
             match self.input[self.index] {
                 b'"' => {
-                    let slice = if self.scratch.is_empty() {
+                    if self.scratch.is_empty() {
                         // Fast path: return a slice of the raw JSON without any
                         // copying.
-                        let borrowed = &self.input[start..self.index];
+                        let bin = self.input.make_subbinary(start, self.index - start)?;
                         self.index += 1;
-                        borrowed
+                        return Ok(bin.to_term(self.env));
                     } else {
                         self.scratch
                             .extend_from_slice(&self.input[start..self.index]);
                         self.index += 1;
-                        &self.scratch
-                    };
-                    let mut bin = NewBinary::new(self.env, slice.len());
-                    bin.as_mut_slice().write_all(slice)?;
-                    let term = Binary::from(bin).to_term(self.env);
-                    return Ok(term);
+
+                        let mut bin = NewBinary::new(self.env, self.scratch.len());
+                        bin.as_mut_slice().write_all(&self.scratch)?;
+                        let term = Binary::from(bin).to_term(self.env);
+                        return Ok(term);
+                    }
                 }
                 b'\\' => {
                     self.scratch
@@ -570,17 +581,6 @@ impl<'a, 'b> Decoder<'a, 'b> {
     fn invalid_number(&self) -> Error<'a> {
         Error::tuple(invalid_number(), vec![self.index.encode(self.env)])
     }
-}
-
-pub fn decode<'a>(env: Env<'a>, input: &[u8]) -> Result<Term<'a>, Error<'a>> {
-    let mut d = Decoder {
-        env,
-        input,
-        stack: Vec::with_capacity(16),
-        index: 0,
-        scratch: vec![],
-    };
-    d.decode()
 }
 
 static HEX: [u8; 256] = {
