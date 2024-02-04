@@ -29,7 +29,11 @@ use rustler::{
     types::{atom, binary::NewBinary, Binary, Encoder},
     Env, Term,
 };
-use std::{hint::unreachable_unchecked, io::Write};
+use std::{
+    collections::{hash_map::RandomState, HashMap},
+    hint::unreachable_unchecked,
+    io::Write,
+};
 
 rustler::atoms! {
     unexpected,
@@ -152,21 +156,10 @@ impl<'a> Decoder<'a> {
                             Err(_) => {
                                 // slow path: otp rejects duplciate keys, so we need to
                                 // filter it ourselves :/
-                                let mut pairs = Vec::new();
-                                for (k, v) in keys.into_iter().zip(values) {
-                                    let k = k.decode_as_binary()?.as_slice().to_owned();
-                                    pairs.push((k, v));
-                                }
-                                pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
-                                pairs.dedup_by(|a, b| a.0 == b.0);
-                                let pairs = pairs
-                                    .into_iter()
-                                    .map(|(k, v)| {
-                                        let mut bin = NewBinary::new(self.env, k.len());
-                                        bin.as_mut_slice().write_all(&k).unwrap();
-                                        (Binary::from(bin).to_term(self.env), v)
-                                    })
-                                    .collect::<Vec<_>>();
+                                let map = HashMap::<_, _, RandomState>::from_iter(
+                                    keys.into_iter().zip(values),
+                                );
+                                let pairs = map.into_iter().collect::<Vec<_>>();
                                 Term::map_from_pairs(self.env, &pairs)?
                             }
                         };

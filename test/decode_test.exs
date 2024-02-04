@@ -86,7 +86,7 @@ defmodule Jsont.DecodeTest do
     expected = %{"foo" => %{"bar" => "baz"}}
     assert parse!(~s({"foo": {"bar": "baz"}})) == expected
 
-    assert parse!(~s({"a": 1, "a": 2})) == %{"a" => 1}
+    assert parse!(~s({"a": 1, "a": 2})) == %{"a" => 2}
   end
 
   test "arrays" do
