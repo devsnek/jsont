@@ -1,6 +1,10 @@
 defmodule Jsont.EncoderTest do
   use ExUnit.Case, async: true
 
+  defmodule Struct do
+    defstruct field: "hi"
+  end
+
   test "atom" do
     assert to_json(nil) == "null"
     assert to_json(true) == "true"
@@ -77,8 +81,20 @@ defmodule Jsont.EncoderTest do
   end
 
   test "strip struct" do
-    assert to_json(MapSet.new()) == ~s({"map":{},"__struct__":"Elixir.MapSet"})
-    assert to_json(MapSet.new(), strip_elixir_struct: true) == ~s({"map":{}})
+    struct = %Struct{}
+
+    expected =
+      Map.keys(struct)
+      |> Enum.map(fn k ->
+        v = get_in(struct, [Access.key(k)])
+        ~s("#{k}":"#{v}")
+      end)
+      |> Enum.join(",")
+
+    expected = "{#{expected}}"
+    assert to_json(%Struct{}) == expected
+
+    assert to_json(%Struct{}, strip_elixir_struct: true) == ~s({"field":"hi"})
   end
 
   defp to_json(value, opts \\ []) do
