@@ -76,6 +76,11 @@ defmodule Jsont.EncoderTest do
     assert to_json({1, 2, 3}) == "[1,2,3]"
   end
 
+  test "strip struct" do
+    assert to_json(MapSet.new()) == ~s({"map":{},"__struct__":"Elixir.MapSet"})
+    assert to_json(MapSet.new(), strip_elixir_struct: true) == ~s({"map":{}})
+  end
+
   defp to_json(value, opts \\ []) do
     {:ok, binary} = Jsont.encode(value, opts)
     binary

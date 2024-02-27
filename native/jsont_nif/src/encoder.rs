@@ -36,17 +36,20 @@ rustler::atoms! {
     cannot_encode,
     internal,
     invalid_object_key,
+    __struct__,
 }
 
 pub fn encode<'a>(
     env: Env<'a>,
     term: Term<'a>,
     bigint_as_string: bool,
+    strip_elixir_struct: bool,
 ) -> Result<Vec<u8>, Error<'a>> {
     let mut out = Vec::with_capacity(128);
     let mut visitor = Visitor {
         env,
         bigint_as_string,
+        strip_elixir_struct,
         formatter: serde_json::ser::CompactFormatter,
         writer: &mut out,
     };
@@ -56,6 +59,7 @@ pub fn encode<'a>(
 struct Visitor<'a, F, W> {
     env: Env<'a>,
     bigint_as_string: bool,
+    strip_elixir_struct: bool,
     formatter: F,
     writer: W,
 }
@@ -161,6 +165,10 @@ where
 
         self.formatter.begin_object(&mut self.writer)?;
         for (i, (k, v)) in iter.enumerate() {
+            if self.strip_elixir_struct && __struct__() == k {
+                continue;
+            }
+
             self.formatter.begin_object_key(&mut self.writer, i == 0)?;
             self.write_object_key(k)?;
             self.formatter.end_object_key(&mut self.writer)?;

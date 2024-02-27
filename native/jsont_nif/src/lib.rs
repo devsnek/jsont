@@ -10,8 +10,13 @@ mod encoder;
 rustler::init!("Elixir.Jsont.NifBridge", [encode, decode]);
 
 #[rustler::nif]
-fn encode<'a>(env: Env<'a>, term: Term<'a>, bigint_as_string: bool) -> (Atom, Term<'a>) {
-    match encoder::encode(env, term, bigint_as_string) {
+fn encode<'a>(
+    env: Env<'a>,
+    term: Term<'a>,
+    bigint_as_string: bool,
+    strip_elixir_struct: bool,
+) -> (Atom, Term<'a>) {
+    match encoder::encode(env, term, bigint_as_string, strip_elixir_struct) {
         Ok(out) => {
             let mut bin = NewBinary::new(env, out.len());
             if let Err(e) = bin.as_mut_slice().write_all(&out) {
