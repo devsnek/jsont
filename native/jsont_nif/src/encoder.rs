@@ -163,12 +163,19 @@ where
             ));
         };
 
-        self.formatter.begin_object(&mut self.writer)?;
-        for (i, (k, v)) in iter.enumerate() {
-            if self.strip_elixir_struct && __struct__() == k {
-                continue;
-            }
+        let strip_elixir_struct = self.strip_elixir_struct;
+        let iter = iter
+            .filter(|pair| {
+                if strip_elixir_struct {
+                    __struct__() != pair.0
+                } else {
+                    true
+                }
+            })
+            .enumerate();
 
+        self.formatter.begin_object(&mut self.writer)?;
+        for (i, (k, v)) in iter {
             self.formatter.begin_object_key(&mut self.writer, i == 0)?;
             self.write_object_key(k)?;
             self.formatter.end_object_key(&mut self.writer)?;
