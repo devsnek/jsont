@@ -198,19 +198,15 @@ where
     }
 
     fn visit_float(&mut self, term: Term, force_as_string: bool) -> Result<(), Error<'a>> {
-        match term.decode::<f64>() {
-            Ok(f) => {
-                if force_as_string {
-                    self.formatter.begin_string(&mut self.writer)?;
-                }
-                self.formatter.write_f64(&mut self.writer, f)?;
-                if force_as_string {
-                    self.formatter.end_string(&mut self.writer)?;
-                }
-                Ok(())
-            }
-            Err(_) => self.visit_integer(term, force_as_string),
+        let f = term.decode::<f64>()?;
+        if force_as_string {
+            self.formatter.begin_string(&mut self.writer)?;
         }
+        self.formatter.write_f64(&mut self.writer, f)?;
+        if force_as_string {
+            self.formatter.end_string(&mut self.writer)?;
+        }
+        Ok(())
     }
 
     fn visit_integer(&mut self, term: Term, force_as_string: bool) -> Result<(), Error<'a>> {
