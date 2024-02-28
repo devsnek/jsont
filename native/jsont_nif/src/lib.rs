@@ -9,7 +9,7 @@ mod encoder;
 
 rustler::init!("Elixir.Jsont.NifBridge", [encode, decode]);
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn encode<'a>(
     env: Env<'a>,
     term: Term<'a>,
@@ -29,7 +29,7 @@ fn encode<'a>(
     }
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn decode<'a>(env: Env<'a>, term: Term<'a>) -> (Atom, Term<'a>) {
     let binary = match Binary::from_iolist(term) {
         Ok(binary) => binary,
