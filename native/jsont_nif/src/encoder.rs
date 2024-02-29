@@ -26,8 +26,8 @@
 
 use crate::Error;
 use rustler::{
-    types::{tuple::get_tuple, MapIterator},
-    Encoder, Env, Term, TermType,
+    types::{atom, MapIterator},
+    Binary, Branch, Encoder as RustlerEncoder, Env, NewBinary, Term, TermType, Yield,
 };
 use serde_json::ser::{CharEscape, Formatter};
 use std::io::Write;
@@ -41,50 +41,215 @@ rustler::atoms! {
 
 pub fn encode<'a>(
     env: Env<'a>,
-    term: Term<'a>,
+    out: Vec<u8>,
+    stack: Term<'a>,
     bigint_as_string: bool,
     strip_elixir_struct: bool,
-) -> Result<Vec<u8>, Error<'a>> {
-    let mut out = Vec::with_capacity(128);
-    let mut visitor = Visitor {
+) -> Branch<'a, Term<'a>> {
+    let mut encoder = Encoder {
+        stack,
         env,
         bigint_as_string,
         strip_elixir_struct,
         formatter: serde_json::ser::CompactFormatter,
-        writer: &mut out,
+        writer: out,
     };
-    visitor.visit(term).map(|_| out)
+    match encoder.encode() {
+        Ok(branch) => match branch {
+            Branch::Stop(()) => {
+                let mut bin = NewBinary::new(env, encoder.writer.len());
+                if let Err(e) = bin.as_mut_slice().write_all(&encoder.writer) {
+                    return Branch::Stop(crate::encode_error(env, e.into()));
+                }
+                let term = Binary::from(bin).to_term(env);
+                Branch::Stop((atom::ok(), term).encode(env))
+            }
+            Branch::Yield(y) => Branch::Yield(y),
+        },
+        Err(e) => Branch::Stop(crate::encode_error(env, e)),
+    }
 }
 
-struct Visitor<'a, F, W> {
+#[rustler::nif]
+fn resume<'a>(
     env: Env<'a>,
+    out: Vec<u8>,
+    stack: Term<'a>,
+    bigint_as_string: bool,
+    strip_elixir_struct: bool,
+) -> Branch<'a, Term<'a>> {
+    encode(env, out, stack, bigint_as_string, strip_elixir_struct)
+}
+
+struct Encoder<'a, F> {
+    env: Env<'a>,
+    stack: Term<'a>,
     bigint_as_string: bool,
     strip_elixir_struct: bool,
     formatter: F,
-    writer: W,
+    writer: Vec<u8>,
 }
 
-impl<'a, F, W> Visitor<'a, F, W>
+impl<'a, F> Encoder<'a, F>
 where
     F: Formatter,
-    W: Write,
 {
-    fn visit(&mut self, term: Term<'a>) -> Result<(), Error<'a>> {
+    fn push(&mut self, term: impl RustlerEncoder) {
+        self.stack = self.stack.list_prepend(term.encode(self.env));
+    }
+
+    fn pop(&mut self) -> Result<Term<'a>, Error<'a>> {
+        let (head, tail) = self.stack.list_get_cell()?;
+        self.stack = tail;
+        Ok(head)
+    }
+
+    fn encode(&mut self) -> Result<Branch<'a, ()>, Error<'a>> {
         use TermType::*;
-        match term.get_type() {
-            Atom => self.visit_atom(term),
-            Binary => self.visit_binary(term),
-            List => self.visit_list(term),
-            Map => self.visit_map(term),
-            Integer => self.visit_integer(term, false),
-            Float => self.visit_float(term, false),
-            Tuple => self.visit_tuple(term),
-            Fun => Err(Error::tuple(cannot_encode(), vec![term])),
-            Pid => Err(Error::tuple(cannot_encode(), vec![term])),
-            Port => Err(Error::tuple(cannot_encode(), vec![term])),
-            Ref => Err(Error::tuple(cannot_encode(), vec![term])),
-            Unknown => Err(Error::tuple(cannot_encode(), vec![term])),
+
+        let mut reds = 0;
+
+        loop {
+            if self.stack.is_empty_list() {
+                break;
+            }
+
+            if reds > 4000 {
+                let args = vec![
+                    self.writer.encode(self.env),
+                    self.stack,
+                    self.bigint_as_string.encode(self.env),
+                    self.strip_elixir_struct.encode(self.env),
+                ];
+                return Ok(Branch::Yield(Yield::to(resume, args)));
+            }
+
+            reds += 1;
+
+            let term = self.pop()?;
+            match term.get_type() {
+                Atom => {
+                    let string = term.atom_to_string()?;
+                    match string.as_str() {
+                        "true" => self.formatter.write_bool(&mut self.writer, true)?,
+                        "false" => self.formatter.write_bool(&mut self.writer, false)?,
+                        "nil" => self.formatter.write_null(&mut self.writer)?,
+                        _ => self.write_string(string.as_bytes())?,
+                    }
+                }
+                Binary => {
+                    let binary = term.into_binary()?;
+                    self.write_string(binary.as_slice())?;
+                }
+                Integer => {
+                    self.write_integer(term, false)?;
+                }
+                Float => {
+                    let f = term.decode::<f64>()?;
+                    self.formatter.write_f64(&mut self.writer, f)?;
+                }
+                List => {
+                    self.formatter.begin_array(&mut self.writer)?;
+                    match term.list_get_cell() {
+                        Ok((head, tail)) => {
+                            self.push(tail);
+                            self.push(head);
+                            self.formatter.begin_array_value(&mut self.writer, true)?;
+                            continue;
+                        }
+                        Err(e) => {
+                            if term.is_empty_list() {
+                                self.formatter.end_array(&mut self.writer)?;
+                            } else {
+                                return Err(e.into());
+                            }
+                        }
+                    }
+                }
+                Map => {
+                    self.formatter.begin_object(&mut self.writer)?;
+                    let Some(mut iter) = MapIterator::new(term) else {
+                        return Err(Error::tuple(
+                            internal(),
+                            vec!["failed to construct MapIterator".encode(self.env)],
+                        ));
+                    };
+                    match iter.next() {
+                        Some((k, v)) => {
+                            self.push(term.map_remove(k)?);
+                            self.push(v);
+                            self.write_object_key(k, true)?;
+                            self.formatter.begin_object_value(&mut self.writer)?;
+                            continue;
+                        }
+                        None => {
+                            self.formatter.end_object(&mut self.writer)?;
+                        }
+                    }
+                }
+                Tuple | Fun | Pid | Port | Ref | Unknown => {
+                    return Err(Error::tuple(cannot_encode(), vec![term]));
+                }
+            }
+
+            loop {
+                reds += 1;
+
+                if self.stack.is_empty_list() {
+                    break;
+                }
+
+                let term = self.pop()?;
+                match term.get_type() {
+                    List => {
+                        self.formatter.end_array_value(&mut self.writer)?;
+
+                        match term.list_get_cell() {
+                            Ok((head, tail)) => {
+                                self.push(tail);
+                                self.push(head);
+                                self.formatter.begin_array_value(&mut self.writer, false)?;
+                                break;
+                            }
+                            Err(e) => {
+                                if term.is_empty_list() {
+                                    self.formatter.end_array(&mut self.writer)?;
+                                } else {
+                                    return Err(e.into());
+                                }
+                            }
+                        }
+                    }
+                    Map => {
+                        self.formatter.end_object_value(&mut self.writer)?;
+
+                        let Some(mut iter) = MapIterator::new(term) else {
+                            return Err(Error::tuple(
+                                internal(),
+                                vec!["failed to construct MapIterator".encode(self.env)],
+                            ));
+                        };
+                        match iter.next() {
+                            Some((k, v)) => {
+                                self.push(term.map_remove(k)?);
+                                self.push(v);
+                                self.write_object_key(k, false)?;
+                                self.formatter.begin_object_value(&mut self.writer)?;
+                                break;
+                            }
+                            None => {
+                                self.formatter.end_object(&mut self.writer)?;
+                            }
+                        }
+                    }
+                    _ => {
+                        unreachable!()
+                    }
+                }
+            }
         }
+
+        Ok(Branch::Stop(()))
     }
 
     fn write_string(&mut self, mut input: &[u8]) -> Result<(), Error<'a>> {
@@ -120,115 +285,11 @@ where
         Ok(())
     }
 
-    fn visit_atom(&mut self, term: Term<'a>) -> Result<(), Error<'a>> {
-        let string = term.atom_to_string()?;
-        match string.as_str() {
-            "true" => self.formatter.write_bool(&mut self.writer, true)?,
-            "false" => self.formatter.write_bool(&mut self.writer, false)?,
-            "nil" => self.formatter.write_null(&mut self.writer)?,
-            _ => self.write_string(string.as_bytes())?,
-        }
-        Ok(())
-    }
-
-    fn visit_binary(&mut self, term: Term<'a>) -> Result<(), Error<'a>> {
-        let binary = term.into_binary()?;
-        self.write_string(binary.as_slice())?;
-        Ok(())
-    }
-
-    #[inline]
-    fn write_array(&mut self, terms: impl Iterator<Item = Term<'a>>) -> Result<(), Error<'a>> {
-        self.formatter.begin_array(&mut self.writer)?;
-        for (i, term) in terms.enumerate() {
-            self.formatter.begin_array_value(&mut self.writer, i == 0)?;
-            self.visit(term)?;
-            self.formatter.end_array_value(&mut self.writer)?;
-        }
-        self.formatter.end_array(&mut self.writer)?;
-        Ok(())
-    }
-
-    fn visit_list(&mut self, term: Term<'a>) -> Result<(), Error<'a>> {
-        let iter = term.into_list_iterator()?;
-        self.write_array(iter)?;
-        Ok(())
-    }
-
-    fn visit_map(&mut self, term: Term<'a>) -> Result<(), Error<'a>> {
-        let Some(iter) = MapIterator::new(term) else {
-            return Err(Error::tuple(
-                internal(),
-                vec!["failed to construct MapIterator".encode(self.env)],
-            ));
-        };
-
-        let strip_elixir_struct = self.strip_elixir_struct;
-        let iter = iter
-            .filter(|pair| {
-                if strip_elixir_struct {
-                    __struct__() != pair.0
-                } else {
-                    true
-                }
-            })
-            .enumerate();
-
-        self.formatter.begin_object(&mut self.writer)?;
-        for (i, (k, v)) in iter {
-            self.formatter.begin_object_key(&mut self.writer, i == 0)?;
-            self.write_object_key(k)?;
-            self.formatter.end_object_key(&mut self.writer)?;
-
-            self.formatter.begin_object_value(&mut self.writer)?;
-            self.visit(v)?;
-            self.formatter.end_object_value(&mut self.writer)?;
-        }
-        self.formatter.end_object(&mut self.writer)?;
-
-        Ok(())
-    }
-
-    fn write_object_key(&mut self, term: Term<'a>) -> Result<(), Error<'a>> {
-        match term.get_type() {
-            TermType::Atom => {
-                let string = term.atom_to_string()?;
-                self.write_string(string.as_bytes())?;
-            }
-            TermType::Binary => {
-                let binary = term.into_binary()?;
-                self.write_string(binary.as_slice())?;
-            }
-            TermType::Float => {
-                self.visit_float(term, true)?;
-            }
-            TermType::Integer => {
-                self.visit_integer(term, true)?;
-            }
-            _ => {
-                return Err(Error::tuple(invalid_object_key(), vec![term]));
-            }
-        }
-        Ok(())
-    }
-
-    fn visit_float(&mut self, term: Term, force_as_string: bool) -> Result<(), Error<'a>> {
-        let f = term.decode::<f64>()?;
-        if force_as_string {
-            self.formatter.begin_string(&mut self.writer)?;
-        }
-        self.formatter.write_f64(&mut self.writer, f)?;
-        if force_as_string {
-            self.formatter.end_string(&mut self.writer)?;
-        }
-        Ok(())
-    }
-
-    fn visit_integer(&mut self, term: Term, force_as_string: bool) -> Result<(), Error<'a>> {
+    fn write_integer(&mut self, term: Term<'a>, force_string: bool) -> Result<(), Error<'a>> {
         match term.decode::<i64>() {
             Ok(i) => {
                 #[allow(clippy::manual_range_contains)]
-                let as_string = force_as_string
+                let as_string = force_string
                     || (self.bigint_as_string && (i < -9007199254740992 || i > 9007199254740992));
                 if as_string {
                     self.formatter.begin_string(&mut self.writer)?;
@@ -239,7 +300,7 @@ where
                 }
             }
             Err(_) => {
-                let as_string = force_as_string || self.bigint_as_string;
+                let as_string = force_string || self.bigint_as_string;
 
                 let big = term.decode::<crate::big::BigInt>()?;
                 let string = big.to_string();
@@ -256,9 +317,31 @@ where
         Ok(())
     }
 
-    fn visit_tuple(&mut self, term: Term<'a>) -> Result<(), Error<'a>> {
-        let terms = get_tuple(term)?;
-        self.write_array(terms.into_iter())?;
+    fn write_object_key(&mut self, term: Term<'a>, first: bool) -> Result<(), Error<'a>> {
+        self.formatter.begin_object_key(&mut self.writer, first)?;
+        match term.get_type() {
+            TermType::Atom => {
+                let string = term.atom_to_string()?;
+                self.write_string(string.as_bytes())?;
+            }
+            TermType::Binary => {
+                let binary = term.into_binary()?;
+                self.write_string(binary.as_slice())?;
+            }
+            TermType::Float => {
+                let f = term.decode::<f64>()?;
+                self.formatter.begin_string(&mut self.writer)?;
+                self.formatter.write_f64(&mut self.writer, f)?;
+                self.formatter.end_string(&mut self.writer)?;
+            }
+            TermType::Integer => {
+                self.write_integer(term, true)?;
+            }
+            _ => {
+                return Err(Error::tuple(invalid_object_key(), vec![term]));
+            }
+        }
+        self.formatter.end_object_key(&mut self.writer)?;
         Ok(())
     }
 }

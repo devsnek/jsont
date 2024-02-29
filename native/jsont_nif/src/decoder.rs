@@ -83,10 +83,9 @@ struct Decoder<'a> {
 
 impl<'a> Decoder<'a> {
     fn decode(&mut self) -> Result<Branch<'a, Term<'a>>, Error<'a>> {
-        let mut i = 0;
+        let mut reds = 0;
         loop {
-            i += 1;
-            if i > 1000 {
+            if reds > 4000 {
                 let args = vec![
                     self.input.to_term(self.env),
                     self.index.encode(self.env),
@@ -94,6 +93,8 @@ impl<'a> Decoder<'a> {
                 ];
                 return Ok(Branch::Yield(Yield::to(resume, args)));
             }
+
+            reds += 1;
 
             self.skip_whitespace();
             let mut value = match self.peek() {
@@ -144,6 +145,8 @@ impl<'a> Decoder<'a> {
             };
 
             loop {
+                reds += 1;
+
                 if self.stack.is_empty_list() {
                     self.skip_whitespace();
                     if self.peek().is_some() {

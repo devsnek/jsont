@@ -1,35 +1,27 @@
 use rustler::{
     types::{atom, tuple::make_tuple, Encoder},
-    Atom, Binary, Branch, Env, NewBinary, Term,
+    Atom, Binary, Branch, Env, Term,
 };
-use std::io::Write;
 mod big;
 mod decoder;
 mod encoder;
 
 rustler::init!("Elixir.Jsont.NifBridge", [encode, decode]);
 
-#[rustler::nif(schedule = "DirtyCpu")]
+#[rustler::nif]
 fn encode<'a>(
     env: Env<'a>,
     term: Term<'a>,
     bigint_as_string: bool,
     strip_elixir_struct: bool,
-) -> Term<'a> {
-    match encoder::encode(env, term, bigint_as_string, strip_elixir_struct) {
-        Ok(out) => {
-            let mut bin = NewBinary::new(env, out.len());
-            if let Err(e) = bin.as_mut_slice().write_all(&out) {
-                return encode_error(env, e.into());
-            }
-            let term = Binary::from(bin).to_term(env);
-            (atom::ok(), term).encode(env)
-        }
-        Err(e) => encode_error(env, e),
-    }
+) -> Branch<'a, Term<'a>> {
+    let out = Vec::with_capacity(128);
+    let stack = Term::list_new_empty(env);
+    let stack = stack.list_prepend(term);
+    encoder::encode(env, out, stack, bigint_as_string, strip_elixir_struct)
 }
 
-#[rustler::nif(schedule = "DirtyCpu")]
+#[rustler::nif]
 fn decode<'a>(env: Env<'a>, term: Term<'a>) -> Branch<'a, Term<'a>> {
     let binary = match Binary::from_iolist(term) {
         Ok(binary) => binary,
