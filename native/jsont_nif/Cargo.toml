@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 num-bigint = "0.4.4"
-rustler = "0.31.0"
+rustler = { path = "../../../rustler/rustler" }  #"0.31.0"
 serde_json = "1.0.111"
 simdutf8 = "0.1.4"
 
