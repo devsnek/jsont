@@ -27,13 +27,9 @@
 use crate::Error;
 use rustler::{
     types::{atom, binary::NewBinary, Binary, Encoder},
-    Env, Term,
+    Branch, Env, Term, Yield,
 };
-use std::{
-    collections::{hash_map::RandomState, HashMap},
-    hint::unreachable_unchecked,
-    io::Write,
-};
+use std::io::Write;
 
 rustler::atoms! {
     unexpected,
@@ -43,33 +39,62 @@ rustler::atoms! {
     invalid_big,
 }
 
-pub fn decode<'a>(env: Env<'a>, input: Binary<'a>) -> Result<Term<'a>, Error<'a>> {
+pub fn decode<'a>(
+    env: Env<'a>,
+    input: Binary<'a>,
+    index: usize,
+    stack: Term<'a>,
+) -> Branch<'a, Term<'a>> {
     let mut d = Decoder {
         env,
         input,
-        stack: Vec::with_capacity(16),
-        index: 0,
+        stack,
+        index,
         scratch: vec![],
     };
-    d.decode()
+
+    match d.decode() {
+        Ok(branch) => match branch {
+            Branch::Stop(v) => Branch::Stop((atom::ok(), v).encode(env)),
+            Branch::Yield(y) => Branch::Yield(y),
+        },
+        Err(e) => Branch::Stop(crate::encode_error(env, e)),
+    }
 }
 
-enum Entry<'a> {
-    Array(Term<'a>),
-    Object(Vec<Term<'a>>, Vec<Term<'a>>),
+#[rustler::nif]
+fn resume<'a>(
+    env: Env<'a>,
+    input: Binary<'a>,
+    index: usize,
+    stack: Term<'a>,
+) -> Branch<'a, Term<'a>> {
+    decode(env, input, index, stack)
 }
 
 struct Decoder<'a> {
     env: Env<'a>,
-    stack: Vec<Entry<'a>>,
+    stack: Term<'a>,
     input: Binary<'a>,
     index: usize,
     scratch: Vec<u8>,
 }
 
 impl<'a> Decoder<'a> {
-    fn decode(&mut self) -> Result<Term<'a>, Error<'a>> {
+    fn decode(&mut self) -> Result<Branch<'a, Term<'a>>, Error<'a>> {
+        let mut reds = 0;
         loop {
+            if reds > 4000 {
+                let args = vec![
+                    self.input.to_term(self.env),
+                    self.index.encode(self.env),
+                    self.stack,
+                ];
+                return Ok(Branch::Yield(Yield::to(resume, args)));
+            }
+
+            reds += 1;
+
             self.skip_whitespace();
             let mut value = match self.peek() {
                 Some(b'n') => {
@@ -98,7 +123,7 @@ impl<'a> Decoder<'a> {
                         let key = self.parse_string()?.to_owned();
                         self.skip_whitespace();
                         self.expect(b':')?;
-                        self.stack.push(Entry::Object(vec![key], vec![]));
+                        self.stack = self.stack.list_prepend((Term::map_new(self.env), key));
                         continue;
                     }
                 }
@@ -109,7 +134,7 @@ impl<'a> Decoder<'a> {
                     if self.eat(b']') {
                         list
                     } else {
-                        self.stack.push(Entry::Array(list));
+                        self.stack = self.stack.list_prepend(list);
                         continue;
                     }
                 }
@@ -119,67 +144,49 @@ impl<'a> Decoder<'a> {
             };
 
             loop {
-                match self.stack.last_mut() {
-                    None => {
-                        self.skip_whitespace();
-                        if self.peek().is_some() {
-                            return Err(self.unexpected());
-                        }
-                        return Ok(value);
+                reds += 1;
+
+                if self.stack.is_empty_list() {
+                    self.skip_whitespace();
+                    if self.peek().is_some() {
+                        return Err(self.unexpected());
                     }
-                    Some(Entry::Object(_, values)) => {
-                        values.push(value);
-                        self.skip_whitespace();
-                        if self.eat(b',') {
-                            self.skip_whitespace();
-                            let key = self.parse_string()?.to_owned();
-                            let Some(Entry::Object(keys, _)) = self.stack.last_mut() else {
-                                // SAFETY: the last item on the stack is always an object.
-                                unsafe {
-                                    unreachable_unchecked();
-                                }
-                            };
-                            keys.push(key);
-                            self.skip_whitespace();
-                            self.expect(b':')?;
-                            break;
-                        }
-                        self.expect(b'}')?;
-                        let Some(Entry::Object(keys, values)) = self.stack.pop() else {
-                            // SAFETY: the last item on the stack is always an object.
-                            unsafe {
-                                unreachable_unchecked();
-                            }
-                        };
-                        value = match Term::map_from_term_arrays(self.env, &keys, &values) {
-                            Ok(v) => v,
-                            Err(_) => {
-                                // slow path: otp rejects duplciate keys, so we need to
-                                // filter it ourselves :/
-                                let map = HashMap::<_, _, RandomState>::from_iter(
-                                    keys.into_iter().zip(values),
-                                );
-                                let pairs = map.into_iter().collect::<Vec<_>>();
-                                Term::map_from_pairs(self.env, &pairs)?
-                            }
-                        };
-                        continue;
-                    }
-                    Some(Entry::Array(list)) => {
-                        *list = list.list_prepend(value);
-                        self.skip_whitespace();
-                        if self.eat(b',') {
-                            break;
-                        }
-                        self.expect(b']')?;
-                        let Some(Entry::Array(list)) = self.stack.pop() else {
-                            // SAFETY: the last item on the stack is always an array
-                            unsafe { unreachable_unchecked() }
-                        };
-                        value = list.list_reverse()?;
-                        continue;
-                    }
+                    return Ok(Branch::Stop(value));
                 }
+
+                let (mut head, tail) = self.stack.list_get_cell()?;
+                self.stack = tail;
+
+                if head.is_list() {
+                    head = head.list_prepend(value);
+                    self.skip_whitespace();
+                    if self.eat(b',') {
+                        self.stack = self.stack.list_prepend(head);
+                        break;
+                    }
+                    self.expect(b']')?;
+                    value = head.list_reverse()?;
+                    continue;
+                }
+
+                if head.is_tuple() {
+                    let (mut map, key): (Term, Term) = head.decode()?;
+                    map = map.map_put(key, value)?;
+                    self.skip_whitespace();
+                    if self.eat(b',') {
+                        self.skip_whitespace();
+                        let key = self.parse_string()?.to_owned();
+                        self.stack = self.stack.list_prepend((map, key));
+                        self.skip_whitespace();
+                        self.expect(b':')?;
+                        break;
+                    }
+                    self.expect(b'}')?;
+                    value = map;
+                    continue;
+                }
+
+                unreachable!();
             }
         }
     }
