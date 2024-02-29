@@ -1,12 +1,18 @@
 use rustler::{
     types::{atom, tuple::make_tuple, Encoder},
-    Atom, Binary, Branch, Env, Term,
+    Atom, Binary, Branch, Env, ResourceArc, Term,
 };
+use std::sync::Mutex;
 mod big;
 mod decoder;
 mod encoder;
 
-rustler::init!("Elixir.Jsont.NifBridge", [encode, decode]);
+rustler::init!("Elixir.Jsont.NifBridge", [encode, decode], load = load);
+
+fn load(env: Env, _term: Term) -> bool {
+    rustler::resource!(encoder::EncoderResource, env);
+    true
+}
 
 #[rustler::nif]
 fn encode<'a>(
@@ -15,10 +21,12 @@ fn encode<'a>(
     bigint_as_string: bool,
     strip_elixir_struct: bool,
 ) -> Branch<'a, Term<'a>> {
-    let out = Vec::with_capacity(128);
+    let resource = ResourceArc::new(encoder::EncoderResource(Mutex::new(Vec::with_capacity(
+        128,
+    ))));
     let stack = Term::list_new_empty(env);
     let stack = stack.list_prepend(term);
-    encoder::encode(env, out, stack, bigint_as_string, strip_elixir_struct)
+    encoder::encode(env, resource, stack, bigint_as_string, strip_elixir_struct)
 }
 
 #[rustler::nif]

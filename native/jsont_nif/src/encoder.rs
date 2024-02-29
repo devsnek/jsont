@@ -26,11 +26,12 @@
 
 use crate::Error;
 use rustler::{
-    types::{atom, MapIterator},
-    Binary, Branch, Encoder as RustlerEncoder, Env, NewBinary, Term, TermType, Yield,
+    types::{atom, tuple::get_tuple, MapIterator},
+    Binary, Branch, Encoder as RustlerEncoder, Env, NewBinary, ResourceArc, Term, TermType, Yield,
 };
 use serde_json::ser::{CharEscape, Formatter};
 use std::io::Write;
+use std::sync::Mutex;
 
 rustler::atoms! {
     cannot_encode,
@@ -39,32 +40,48 @@ rustler::atoms! {
     __struct__,
 }
 
+pub struct EncoderResource(pub Mutex<Vec<u8>>);
+
 pub fn encode<'a>(
     env: Env<'a>,
-    out: Vec<u8>,
+    resource: ResourceArc<EncoderResource>,
     stack: Term<'a>,
     bigint_as_string: bool,
     strip_elixir_struct: bool,
 ) -> Branch<'a, Term<'a>> {
+    let Ok(mut out) = resource.0.lock() else {
+        return Branch::Stop(crate::encode_error(
+            env,
+            Error::tuple(internal(), vec!["Unable to acquire lock".encode(env)]),
+        ));
+    };
     let mut encoder = Encoder {
         stack,
         env,
         bigint_as_string,
         strip_elixir_struct,
         formatter: serde_json::ser::CompactFormatter,
-        writer: out,
+        writer: &mut *out,
     };
     match encoder.encode() {
         Ok(branch) => match branch {
-            Branch::Stop(()) => {
+            Ok(()) => {
                 let mut bin = NewBinary::new(env, encoder.writer.len());
-                if let Err(e) = bin.as_mut_slice().write_all(&encoder.writer) {
+                if let Err(e) = bin.as_mut_slice().write_all(encoder.writer) {
                     return Branch::Stop(crate::encode_error(env, e.into()));
                 }
                 let term = Binary::from(bin).to_term(env);
                 Branch::Stop((atom::ok(), term).encode(env))
             }
-            Branch::Yield(y) => Branch::Yield(y),
+            Err(()) => {
+                let args = vec![
+                    resource.encode(env),
+                    encoder.stack,
+                    encoder.bigint_as_string.encode(env),
+                    encoder.strip_elixir_struct.encode(env),
+                ];
+                Branch::Yield(Yield::to(resume, args))
+            }
         },
         Err(e) => Branch::Stop(crate::encode_error(env, e)),
     }
@@ -73,26 +90,27 @@ pub fn encode<'a>(
 #[rustler::nif]
 fn resume<'a>(
     env: Env<'a>,
-    out: Vec<u8>,
+    resource: ResourceArc<EncoderResource>,
     stack: Term<'a>,
     bigint_as_string: bool,
     strip_elixir_struct: bool,
 ) -> Branch<'a, Term<'a>> {
-    encode(env, out, stack, bigint_as_string, strip_elixir_struct)
+    encode(env, resource, stack, bigint_as_string, strip_elixir_struct)
 }
 
-struct Encoder<'a, F> {
+struct Encoder<'a, F, W> {
     env: Env<'a>,
     stack: Term<'a>,
     bigint_as_string: bool,
     strip_elixir_struct: bool,
     formatter: F,
-    writer: Vec<u8>,
+    writer: W,
 }
 
-impl<'a, F> Encoder<'a, F>
+impl<'a, F, W> Encoder<'a, F, W>
 where
     F: Formatter,
+    W: Write,
 {
     fn push(&mut self, term: impl RustlerEncoder) {
         self.stack = self.stack.list_prepend(term.encode(self.env));
@@ -104,7 +122,7 @@ where
         Ok(head)
     }
 
-    fn encode(&mut self) -> Result<Branch<'a, ()>, Error<'a>> {
+    fn encode(&mut self) -> Result<Result<(), ()>, Error<'a>> {
         use TermType::*;
 
         let mut reds = 0;
@@ -115,13 +133,7 @@ where
             }
 
             if reds > 4000 {
-                let args = vec![
-                    self.writer.encode(self.env),
-                    self.stack,
-                    self.bigint_as_string.encode(self.env),
-                    self.strip_elixir_struct.encode(self.env),
-                ];
-                return Ok(Branch::Yield(Yield::to(resume, args)));
+                return Ok(Err(()));
             }
 
             reds += 1;
@@ -166,8 +178,12 @@ where
                         }
                     }
                 }
+                Tuple => {
+                    let terms = get_tuple(term)?;
+                    self.push(terms.encode(self.env));
+                    continue;
+                }
                 Map => {
-                    self.formatter.begin_object(&mut self.writer)?;
                     let Some(mut iter) = MapIterator::new(term) else {
                         return Err(Error::tuple(
                             internal(),
@@ -177,17 +193,22 @@ where
                     match iter.next() {
                         Some((k, v)) => {
                             self.push(term.map_remove(k)?);
+                            if self.strip_elixir_struct && __struct__() == k {
+                                continue;
+                            }
                             self.push(v);
+                            self.formatter.begin_object(&mut self.writer)?;
                             self.write_object_key(k, true)?;
                             self.formatter.begin_object_value(&mut self.writer)?;
                             continue;
                         }
                         None => {
+                            self.formatter.begin_object(&mut self.writer)?;
                             self.formatter.end_object(&mut self.writer)?;
                         }
                     }
                 }
-                Tuple | Fun | Pid | Port | Ref | Unknown => {
+                Fun | Pid | Port | Ref | Unknown => {
                     return Err(Error::tuple(cannot_encode(), vec![term]));
                 }
             }
@@ -232,6 +253,9 @@ where
                         match iter.next() {
                             Some((k, v)) => {
                                 self.push(term.map_remove(k)?);
+                                if self.strip_elixir_struct && __struct__() == k {
+                                    continue;
+                                }
                                 self.push(v);
                                 self.write_object_key(k, false)?;
                                 self.formatter.begin_object_value(&mut self.writer)?;
@@ -249,7 +273,7 @@ where
             }
         }
 
-        Ok(Branch::Stop(()))
+        Ok(Ok(()))
     }
 
     fn write_string(&mut self, mut input: &[u8]) -> Result<(), Error<'a>> {

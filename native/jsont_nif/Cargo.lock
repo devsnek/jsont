@@ -131,6 +131,7 @@ checksum = "c08c74e62047bb2de4ff487b251e4a92e24f48745648451635cec7d591162d9f"
 [[package]]
 name = "rustler"
 version = "0.31.0"
+source = "git+https://github.com/devsnek/rustler.git?rev=63aba42aced7b99b60caf3cfd3b120204c85830a#63aba42aced7b99b60caf3cfd3b120204c85830a"
 dependencies = [
  "lazy_static",
  "rustler_codegen",
@@ -140,6 +141,7 @@ dependencies = [
 [[package]]
 name = "rustler_codegen"
 version = "0.31.0"
+source = "git+https://github.com/devsnek/rustler.git?rev=63aba42aced7b99b60caf3cfd3b120204c85830a#63aba42aced7b99b60caf3cfd3b120204c85830a"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -150,6 +152,7 @@ dependencies = [
 [[package]]
 name = "rustler_sys"
 version = "2.4.0"
+source = "git+https://github.com/devsnek/rustler.git?rev=63aba42aced7b99b60caf3cfd3b120204c85830a#63aba42aced7b99b60caf3cfd3b120204c85830a"
 dependencies = [
  "regex",
  "unreachable",

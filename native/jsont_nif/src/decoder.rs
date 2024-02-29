@@ -32,7 +32,6 @@ use rustler::{
 use std::io::Write;
 
 rustler::atoms! {
-    missing,
     unexpected,
     end_of_input,
     invalid_number,
