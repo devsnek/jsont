@@ -165,6 +165,7 @@ where
 
         let strip_elixir_struct = self.strip_elixir_struct;
         let iter = iter
+            .rev()
             .filter(|pair| {
                 if strip_elixir_struct {
                     __struct__() != pair.0

@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 num-bigint = "0.4.4"
-rustler = "0.31.0"
+rustler = { git = "https://github.com/devsnek/rustler.git", rev = "85db85042821396f7d5151a965d1e8233ac7738f" }
 serde_json = "1.0.111"
 simdutf8 = "0.1.4"
 
