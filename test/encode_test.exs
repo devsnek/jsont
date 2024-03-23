@@ -53,7 +53,7 @@ defmodule Jsont.EncoderTest do
     assert to_json(%{}) == "{}"
     assert to_json(%{"foo" => "bar"}) == ~s({"foo":"bar"})
     assert to_json(%{foo: :bar}) == ~s({"foo":"bar"})
-    assert to_json(%{"foo" => "foo1", :foo => "foo2"}) == ~s({"foo":"foo2","foo":"foo1"})
+    assert to_json(%{"foo" => "foo1", :foo => "foo2"}) == ~s({"foo":"foo1","foo":"foo2"})
 
     assert to_json(%{42 => :bar}) == ~s({"42":"bar"})
     assert to_json(%{42 => :bar}, bigint_as_string: true) == ~s({"42":"bar"})
@@ -85,6 +85,7 @@ defmodule Jsont.EncoderTest do
 
     expected =
       Map.keys(struct)
+      |> Enum.reverse()
       |> Enum.map(fn k ->
         v = get_in(struct, [Access.key(k)])
         ~s("#{k}":"#{v}")

@@ -27,7 +27,7 @@
 use crate::Error;
 use rustler::{
     types::{atom, binary::NewBinary, Binary, Encoder},
-    Env, Term,
+    BigInt, Env, Term,
 };
 use std::{
     collections::{hash_map::RandomState, HashMap},
@@ -43,13 +43,18 @@ rustler::atoms! {
     invalid_big,
 }
 
-pub fn decode<'a>(env: Env<'a>, input: Binary<'a>) -> Result<Term<'a>, Error<'a>> {
+pub fn decode<'a>(
+    env: Env<'a>,
+    input: Binary<'a>,
+    validate_unicode: bool,
+) -> Result<Term<'a>, Error<'a>> {
     let mut d = Decoder {
         env,
         input,
         stack: Vec::with_capacity(16),
         index: 0,
         scratch: vec![],
+        validate_unicode,
     };
     d.decode()
 }
@@ -65,6 +70,7 @@ struct Decoder<'a> {
     input: Binary<'a>,
     index: usize,
     scratch: Vec<u8>,
+    validate_unicode: bool,
 }
 
 impl<'a> Decoder<'a> {
@@ -242,130 +248,124 @@ impl<'a> Decoder<'a> {
     }
 
     fn parse_number(&mut self) -> Result<Term<'a>, Error<'a>> {
-        let mut buf = String::with_capacity(16);
+        let start = self.index;
         if self.peek() == Some(b'-') {
             self.index += 1;
-            buf.push('-');
         }
-        let float = self.scan_integer(&mut buf)?;
+        let float = self.scan_integer()?;
+        // SAFETY: scanning has validated this range of characters.
+        let slice = unsafe { std::str::from_utf8_unchecked(&self.input[start..self.index]) };
         if float {
-            match buf.parse::<f64>() {
+            match slice.parse::<f64>() {
                 Ok(f) => {
                     if f.is_infinite() {
-                        Err(self.invalid_float("cannot represent inf"))
+                        Err(self.invalid_number("cannot represent inf"))
                     } else {
                         Ok(f.encode(self.env))
                     }
                 }
-                Err(e) => Err(self.invalid_float(format!("{}", e).as_str())),
+                Err(e) => Err(self.invalid_number(e)),
             }
         } else {
-            match buf.parse::<num_bigint::BigInt>() {
-                Ok(big) => Ok(crate::big::BigInt::from(big).encode(self.env)),
-                Err(e) => Err(self.invalid_big(e)),
+            match slice.parse::<i64>() {
+                Ok(i) => Ok(i.encode(self.env)),
+                Err(_) => match slice.parse::<BigInt>() {
+                    Ok(big) => Ok(big.encode(self.env)),
+                    Err(e) => Err(self.invalid_number(e)),
+                },
             }
         }
     }
 
-    fn scan_or_eof(&mut self, buf: &mut String) -> Result<u8, Error<'a>> {
+    fn scan_or_eof(&mut self) -> Result<u8, Error<'a>> {
         match self.next_char() {
-            Some(b) => {
-                buf.push(b as char);
-                Ok(b)
-            }
+            Some(b) => Ok(b),
             None => Err(self.end_of_input()),
         }
     }
 
-    fn scan_integer(&mut self, buf: &mut String) -> Result<bool, Error<'a>> {
-        match self.scan_or_eof(buf)? {
+    fn scan_integer(&mut self) -> Result<bool, Error<'a>> {
+        match self.scan_or_eof()? {
             b'0' => {
                 // There can be only one leading '0'.
                 match self.peek() {
-                    Some(b'0'..=b'9') => Err(self.invalid_number()),
-                    _ => self.scan_number(buf),
+                    Some(b'0'..=b'9') => Err(self.invalid_number("unexpected")),
+                    _ => self.scan_number(),
                 }
             }
             b'1'..=b'9' => loop {
                 match self.peek() {
-                    Some(c @ b'0'..=b'9') => {
+                    Some(b'0'..=b'9') => {
                         self.index += 1;
-                        buf.push(c as char);
                     }
                     _ => {
-                        return self.scan_number(buf);
+                        return self.scan_number();
                     }
                 }
             },
-            _ => Err(self.invalid_number()),
+            _ => Err(self.invalid_number("unexpected")),
         }
     }
 
-    fn scan_number(&mut self, buf: &mut String) -> Result<bool, Error<'a>> {
+    fn scan_number(&mut self) -> Result<bool, Error<'a>> {
         match self.peek() {
             Some(b'.') => {
-                self.scan_decimal(buf)?;
+                self.scan_decimal()?;
                 Ok(true)
             }
-            Some(e @ (b'e' | b'E')) => {
-                self.scan_exponent(e as char, buf)?;
+            Some(b'e' | b'E') => {
+                self.scan_exponent()?;
                 Ok(true)
             }
             _ => Ok(false),
         }
     }
 
-    fn scan_decimal(&mut self, buf: &mut String) -> Result<(), Error<'a>> {
+    fn scan_decimal(&mut self) -> Result<(), Error<'a>> {
         self.index += 1;
-        buf.push('.');
 
         let mut at_least_one_digit = false;
-        while let Some(c @ b'0'..=b'9') = self.peek() {
+        while let Some(b'0'..=b'9') = self.peek() {
             self.index += 1;
-            buf.push(c as char);
             at_least_one_digit = true;
         }
 
         if !at_least_one_digit {
             match self.peek() {
-                Some(_) => return Err(self.invalid_number()),
+                Some(_) => return Err(self.invalid_number("unexpected")),
                 None => return Err(self.end_of_input()),
             }
         }
 
         match self.peek() {
-            Some(e @ (b'e' | b'E')) => self.scan_exponent(e as char, buf),
+            Some(b'e' | b'E') => self.scan_exponent(),
             _ => Ok(()),
         }
     }
 
-    fn scan_exponent(&mut self, e: char, buf: &mut String) -> Result<(), Error<'a>> {
+    fn scan_exponent(&mut self) -> Result<(), Error<'a>> {
         self.index += 1;
-        buf.push(e);
 
         match self.peek() {
             Some(b'+') => {
                 self.index += 1;
-                buf.push('+');
             }
             Some(b'-') => {
                 self.index += 1;
-                buf.push('-');
             }
             _ => {}
         }
 
         // Make sure a digit follows the exponent place.
-        match self.scan_or_eof(buf)? {
+        match self.scan_or_eof()? {
             b'0'..=b'9' => {}
             _ => {
-                return Err(self.invalid_number());
+                return Err(self.invalid_number("unexpected"));
             }
         }
 
-        while let Some(c @ b'0'..=b'9') = self.peek() {
+        while let Some(b'0'..=b'9') = self.peek() {
             self.index += 1;
-            buf.push(c as char);
         }
 
         Ok(())
@@ -380,8 +380,65 @@ impl<'a> Decoder<'a> {
         let mut start = self.index;
 
         loop {
-            while self.index < self.input.len() && !ESCAPE[self.input[self.index] as usize] {
-                self.index += 1;
+            while self.index < self.input.len() {
+                let first = self.input[self.index];
+                if ESCAPE[first as usize] {
+                    break;
+                }
+                if self.validate_unicode && first >= 128 {
+                    macro_rules! next {
+                        () => {{
+                            self.index += 1;
+                            if self.index >= self.input.len() {
+                                return Err(self.end_of_input());
+                            }
+                            self.input[self.index]
+                        }};
+                    }
+                    match UTF8_CHAR_WIDTH[first as usize] {
+                        2 => {
+                            if next!() as i8 >= -64 {
+                                return Err(self.custom("invalid unicode"));
+                            }
+                        }
+                        3 => {
+                            match (first, next!()) {
+                                (0xE0, 0xA0..=0xBF)
+                                | (0xE1..=0xEC, 0x80..=0xBF)
+                                | (0xED, 0x80..=0x9F)
+                                | (0xEE..=0xEF, 0x80..=0xBF) => {}
+                                _ => {
+                                    return Err(self.custom("invalid unicode"));
+                                }
+                            }
+                            if next!() as i8 >= -64 {
+                                return Err(self.custom("invalid unicode"));
+                            }
+                        }
+                        4 => {
+                            match (first, next!()) {
+                                (0xF0, 0x90..=0xBF)
+                                | (0xF1..=0xF3, 0x80..=0xBF)
+                                | (0xF4, 0x80..=0x8F) => {}
+                                _ => {
+                                    return Err(self.custom("invalid unicode"));
+                                }
+                            }
+                            if next!() as i8 >= -64 {
+                                return Err(self.custom("invalid unicode"));
+                            }
+                            if next!() as i8 >= -64 {
+                                return Err(self.custom("invalid unicode"));
+                            }
+                        }
+                        _ => {
+                            return Err(self.custom("invalid unicode"));
+                        }
+                    }
+                    self.index += 1;
+                } else {
+                    self.index += 1;
+                }
             }
             if self.index == self.input.len() {
                 return Err(self.end_of_input());
@@ -453,9 +510,13 @@ impl<'a> Decoder<'a> {
                 }
 
                 let c = match self.decode_hex_escape()? {
-                    n @ 0xDC00..=0xDFFF => {
-                        encode_surrogate(&mut self.scratch, n);
-                        return Ok(());
+                    n @ (0xDC00..=0xDFFF) => {
+                        if self.validate_unicode {
+                            return Err(self.unexpected());
+                        } else {
+                            encode_surrogate(&mut self.scratch, n);
+                            return Ok(());
+                        }
                     }
 
                     // Non-BMP characters are encoded as a sequence of two hex
@@ -465,6 +526,8 @@ impl<'a> Decoder<'a> {
                     n1 @ 0xD800..=0xDBFF => {
                         if self.peek_or_eof()? == b'\\' {
                             self.index += 1;
+                        } else if self.validate_unicode {
+                            return Err(self.unexpected());
                         } else {
                             encode_surrogate(&mut self.scratch, n1);
                             return Ok(());
@@ -472,6 +535,8 @@ impl<'a> Decoder<'a> {
 
                         if self.peek_or_eof()? == b'u' {
                             self.index += 1;
+                        } else if self.validate_unicode {
+                            return Err(self.unexpected());
                         } else {
                             encode_surrogate(&mut self.scratch, n1);
                             // The \ prior to this byte started an escape sequence,
@@ -486,7 +551,7 @@ impl<'a> Decoder<'a> {
 
                         #[allow(clippy::manual_range_contains)]
                         if n2 < 0xDC00 || n2 > 0xDFFF {
-                            return Err(self.custom("lone leadning surrogate in hex escape"));
+                            return Err(self.custom("lone leading surrogate in hex escape"));
                         }
 
                         let n = (((n1 - 0xD800) as u32) << 10 | (n2 - 0xDC00) as u32) + 0x1_0000;
@@ -539,20 +604,12 @@ impl<'a> Decoder<'a> {
     }
 
     #[cold]
-    fn invalid_float(&self, msg: &str) -> Error<'a> {
+    fn invalid_number(&self, msg: impl std::fmt::Display) -> Error<'a> {
         Error::tuple(
-            invalid_float(),
-            vec![self.index.encode(self.env), msg.encode(self.env)],
-        )
-    }
-
-    #[cold]
-    fn invalid_big(&self, e: num_bigint::ParseBigIntError) -> Error<'a> {
-        Error::tuple(
-            invalid_big(),
+            invalid_number(),
             vec![
                 self.index.encode(self.env),
-                format!("{}", e).encode(self.env),
+                format!("{msg}").encode(self.env),
             ],
         )
     }
@@ -568,11 +625,6 @@ impl<'a> Decoder<'a> {
     #[cold]
     fn end_of_input(&self) -> Error<'a> {
         Error::tuple(end_of_input(), vec![self.index.encode(self.env)])
-    }
-
-    #[cold]
-    fn invalid_number(&self) -> Error<'a> {
-        Error::tuple(invalid_number(), vec![self.index.encode(self.env)])
     }
 }
 
@@ -636,3 +688,24 @@ static ESCAPE: [bool; 256] = {
         __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // F
     ]
 };
+
+// https://tools.ietf.org/html/rfc3629
+const UTF8_CHAR_WIDTH: &[u8; 256] = &[
+    // 1  2  3  4  5  6  7  8  9  A  B  C  D  E  F
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 0
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 1
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 2
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 3
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 4
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 5
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 6
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 7
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 8
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 9
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // A
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // B
+    0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, // C
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, // D
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, // E
+    4, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // F
+];

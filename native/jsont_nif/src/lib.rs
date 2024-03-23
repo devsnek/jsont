@@ -3,7 +3,6 @@ use rustler::{
     Atom, Binary, Env, NewBinary, Term,
 };
 use std::io::Write;
-mod big;
 mod decoder;
 mod encoder;
 
@@ -30,14 +29,14 @@ fn encode<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn decode<'a>(env: Env<'a>, term: Term<'a>) -> (Atom, Term<'a>) {
+fn decode<'a>(env: Env<'a>, term: Term<'a>, validate_unicode: bool) -> (Atom, Term<'a>) {
     let binary = match Binary::from_iolist(term) {
         Ok(binary) => binary,
         Err(e) => {
             return (atom::error(), encode_error(env, Error::Rustler(e)));
         }
     };
-    match decoder::decode(env, binary) {
+    match decoder::decode(env, binary, validate_unicode) {
         Ok(term) => (atom::ok(), term),
         Err(e) => (atom::error(), encode_error(env, e)),
     }

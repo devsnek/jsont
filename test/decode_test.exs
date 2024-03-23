@@ -31,6 +31,11 @@ defmodule Jsont.DecodeTest do
     assert parse!("99.99e99") == 99.99e99
     assert parse!("-99.99e-99") == -99.99e-99
     assert parse!("123456789.123456789e123") == 123_456_789.123456789e123
+
+    assert parse!("-9223372036854775808") == -9_223_372_036_854_775_808
+    assert parse!("-9223372036854775809") == -9_223_372_036_854_775_809
+    assert parse!("9223372036854775807") == 9_223_372_036_854_775_807
+    assert parse!("9223372036854775808") == 9_223_372_036_854_775_808
   end
 
   test "number" do
@@ -56,7 +61,9 @@ defmodule Jsont.DecodeTest do
     assert_fail(~s("\\ud8aa\\uda00"))
     assert_fail(~s("\\uxxxx"))
 
-    assert parse!(<<?\", 128, ?\">>) == <<128>>
+    assert_fail(<<?", 128, ?">>, validate_unicode: true)
+    assert parse!(<<?", 128, ?">>, validate_unicode: false) == <<128>>
+
     assert parse!(~s("\\"\\\\\\/\\b\\f\\n\\r\\t")) == ~s("\\/\b\f\n\r\t)
     assert parse!(~s("\\u2603")) == "☃"
     assert parse!(~s("\\u2028\\u2029")) == "\u2028\u2029"
@@ -157,8 +164,8 @@ defmodule Jsont.DecodeTest do
     end
   end
 
-  defp parse!(json) do
-    case Jsont.decode(json) do
+  defp parse!(json, opts \\ []) do
+    case Jsont.decode(json, opts) do
       {:ok, term} ->
         term
 
@@ -167,7 +174,7 @@ defmodule Jsont.DecodeTest do
     end
   end
 
-  defp assert_fail(string) do
-    {:error, _} = Jsont.decode(string)
+  defp assert_fail(string, opts \\ []) do
+    {:error, _} = Jsont.decode(string, opts)
   end
 end

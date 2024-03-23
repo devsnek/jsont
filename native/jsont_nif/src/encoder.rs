@@ -27,7 +27,7 @@
 use crate::Error;
 use rustler::{
     types::{tuple::get_tuple, MapIterator},
-    Encoder, Env, Term, TermType,
+    BigInt, Encoder, Env, Term, TermType,
 };
 use serde_json::ser::{CharEscape, Formatter};
 use std::io::Write;
@@ -165,6 +165,7 @@ where
 
         let strip_elixir_struct = self.strip_elixir_struct;
         let iter = iter
+            .rev()
             .filter(|pair| {
                 if strip_elixir_struct {
                     __struct__() != pair.0
@@ -241,7 +242,7 @@ where
             Err(_) => {
                 let as_string = force_as_string || self.bigint_as_string;
 
-                let big = term.decode::<crate::big::BigInt>()?;
+                let big = term.decode::<BigInt>()?;
                 let string = big.to_string();
 
                 if as_string {

@@ -7,6 +7,6 @@ defmodule Jsont.NifBridge do
   def encode(_value, _bigint_as_string, _skip_elixir_struct),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  @spec decode(iodata()) :: {:ok, term()} | {:error, any()}
-  def decode(_value), do: :erlang.nif_error(:nif_not_loaded)
+  @spec decode(iodata(), boolean()) :: {:ok, term()} | {:error, any()}
+  def decode(_value, _validate_unicode), do: :erlang.nif_error(:nif_not_loaded)
 end
