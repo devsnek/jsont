@@ -58,7 +58,7 @@ defmodule Jsont.DecodeTest do
     assert_fail(~s("𝄞))
     assert_fail(~s(\u001F))
     assert_fail(~s("\\ud8aa\\udcxx"))
-    assert_fail(~s("\\ud8aa\\uda00"))
+    assert_fail(~s("\\ud8aa\\uda00"), validate_unicode: true)
     assert_fail(~s("\\uxxxx"))
 
     assert_fail(<<?", 128, ?">>, validate_unicode: true)

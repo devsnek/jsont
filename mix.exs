@@ -38,7 +38,7 @@ defmodule Jsont.MixProject do
 
   defp deps do
     [
-      {:rustler, "~> 0.31.0", runtime: false},
+      {:rustler, "~> 0.34.0", runtime: false},
       {:stream_data, "~> 0.5", only: [:dev, :test], runtime: false},
       {:snapshy, "~> 0.4", only: [:dev, :test], runtime: false}
     ]

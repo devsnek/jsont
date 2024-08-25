@@ -380,66 +380,7 @@ impl<'a> Decoder<'a> {
         let mut start = self.index;
 
         loop {
-            while self.index < self.input.len() {
-                let first = self.input[self.index];
-                if ESCAPE[first as usize] {
-                    break;
-                }
-                if self.validate_unicode && first >= 128 {
-                    macro_rules! next {
-                        () => {{
-                            self.index += 1;
-                            if self.index >= self.input.len() {
-                                return Err(self.end_of_input());
-                            }
-                            self.input[self.index]
-                        }};
-                    }
-                    match UTF8_CHAR_WIDTH[first as usize] {
-                        2 => {
-                            if next!() as i8 >= -64 {
-                                return Err(self.custom("invalid unicode"));
-                            }
-                        }
-                        3 => {
-                            match (first, next!()) {
-                                (0xE0, 0xA0..=0xBF)
-                                | (0xE1..=0xEC, 0x80..=0xBF)
-                                | (0xED, 0x80..=0x9F)
-                                | (0xEE..=0xEF, 0x80..=0xBF) => {}
-                                _ => {
-                                    return Err(self.custom("invalid unicode"));
-                                }
-                            }
-                            if next!() as i8 >= -64 {
-                                return Err(self.custom("invalid unicode"));
-                            }
-                        }
-                        4 => {
-                            match (first, next!()) {
-                                (0xF0, 0x90..=0xBF)
-                                | (0xF1..=0xF3, 0x80..=0xBF)
-                                | (0xF4, 0x80..=0x8F) => {}
-                                _ => {
-                                    return Err(self.custom("invalid unicode"));
-                                }
-                            }
-                            if next!() as i8 >= -64 {
-                                return Err(self.custom("invalid unicode"));
-                            }
-                            if next!() as i8 >= -64 {
-                                return Err(self.custom("invalid unicode"));
-                            }
-                        }
-                        _ => {
-                            return Err(self.custom("invalid unicode"));
-                        }
-                    }
-                    self.index += 1;
-                } else {
-                    self.index += 1;
-                }
-            }
+            self.skip_to_escape(true);
             if self.index == self.input.len() {
                 return Err(self.end_of_input());
             }
@@ -448,6 +389,11 @@ impl<'a> Decoder<'a> {
                     if self.scratch.is_empty() {
                         // Fast path: return a slice of the raw JSON without any
                         // copying.
+                        if self.validate_unicode
+                            && simdutf8::basic::from_utf8(&self.input[start..self.index]).is_err()
+                        {
+                            return Err(self.custom("invalid unicode"));
+                        }
                         let bin = self.input.make_subbinary(start, self.index - start)?;
                         self.index += 1;
                         return Ok(bin.to_term(self.env));
@@ -455,6 +401,12 @@ impl<'a> Decoder<'a> {
                         self.scratch
                             .extend_from_slice(&self.input[start..self.index]);
                         self.index += 1;
+
+                        if self.validate_unicode
+                            && simdutf8::basic::from_utf8(&self.scratch).is_err()
+                        {
+                            return Err(self.custom("invalid unicode"));
+                        }
 
                         let mut bin = NewBinary::new(self.env, self.scratch.len());
                         bin.as_mut_slice().write_all(&self.scratch)?;
@@ -483,6 +435,60 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    fn skip_to_escape(&mut self, forbid_control_characters: bool) {
+        // Immediately bail-out on empty strings and consecutive escapes (e.g. \u041b\u0435)
+        if self.index == self.input.len()
+            || is_escape(self.input[self.index], forbid_control_characters)
+        {
+            return;
+        }
+        self.index += 1;
+
+        let rest = &self.input[self.index..];
+
+        if !forbid_control_characters {
+            self.index += memchr::memchr2(b'"', b'\\', rest).unwrap_or(rest.len());
+            return;
+        }
+
+        // We wish to find the first byte in range 0x00..=0x1F or " or \. Ideally, we'd use
+        // something akin to memchr3, but the memchr crate does not support this at the moment.
+        // Therefore, we use a variation on Mycroft's algorithm [1] to provide performance better
+        // than a naive loop. It runs faster than equivalent two-pass memchr2+SWAR code on
+        // benchmarks and it's cross-platform, so probably the right fit.
+        // [1]: https://groups.google.com/forum/#!original/comp.lang.c/2HtQXvg7iKc/xOJeipH6KLMJ
+
+        const STEP: usize = std::mem::size_of::<u64>();
+        const ONE_BYTES: u64 = u64::MAX / 255; // 0x0101...01
+
+        for chunk in rest.chunks_exact(STEP) {
+            let chars = u64::from_le_bytes(chunk.try_into().unwrap());
+            let contains_ctrl = chars.wrapping_sub(ONE_BYTES * 0x20) & !chars;
+            let chars_quote = chars ^ (ONE_BYTES * u64::from(b'"'));
+            let contains_quote = chars_quote.wrapping_sub(ONE_BYTES) & !chars_quote;
+            let chars_backslash = chars ^ (ONE_BYTES * u64::from(b'\\'));
+            let contains_backslash = chars_backslash.wrapping_sub(ONE_BYTES) & !chars_backslash;
+            let masked = (contains_ctrl | contains_quote | contains_backslash) & (ONE_BYTES << 7);
+            if masked != 0 {
+                // SAFETY: chunk is in-bounds for slice
+                self.index = unsafe { chunk.as_ptr().offset_from(self.input.as_ptr()) } as usize
+                    + masked.trailing_zeros() as usize / 8;
+                return;
+            }
+        }
+
+        self.index += rest.len() / STEP * STEP;
+        self.skip_to_escape_slow();
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn skip_to_escape_slow(&mut self) {
+        while self.index < self.input.len() && !is_escape(self.input[self.index], true) {
+            self.index += 1;
+        }
+    }
+
     fn parse_escape(&mut self) -> Result<(), Error<'a>> {
         let ch = match self.next_char() {
             Some(ch) => ch,
@@ -500,76 +506,7 @@ impl<'a> Decoder<'a> {
             b'n' => self.scratch.push(b'\n'),
             b'r' => self.scratch.push(b'\r'),
             b't' => self.scratch.push(b'\t'),
-            b'u' => {
-                fn encode_surrogate(scratch: &mut Vec<u8>, n: u16) {
-                    scratch.extend_from_slice(&[
-                        (n >> 12 & 0b0000_1111) as u8 | 0b1110_0000,
-                        (n >> 6 & 0b0011_1111) as u8 | 0b1000_0000,
-                        (n & 0b0011_1111) as u8 | 0b1000_0000,
-                    ]);
-                }
-
-                let c = match self.decode_hex_escape()? {
-                    n @ (0xDC00..=0xDFFF) => {
-                        if self.validate_unicode {
-                            return Err(self.unexpected());
-                        } else {
-                            encode_surrogate(&mut self.scratch, n);
-                            return Ok(());
-                        }
-                    }
-
-                    // Non-BMP characters are encoded as a sequence of two hex
-                    // escapes, representing UTF-16 surrogates. If deserializing a
-                    // utf-8 string the surrogates are required to be paired,
-                    // whereas deserializing a byte string accepts lone surrogates.
-                    n1 @ 0xD800..=0xDBFF => {
-                        if self.peek_or_eof()? == b'\\' {
-                            self.index += 1;
-                        } else if self.validate_unicode {
-                            return Err(self.unexpected());
-                        } else {
-                            encode_surrogate(&mut self.scratch, n1);
-                            return Ok(());
-                        }
-
-                        if self.peek_or_eof()? == b'u' {
-                            self.index += 1;
-                        } else if self.validate_unicode {
-                            return Err(self.unexpected());
-                        } else {
-                            encode_surrogate(&mut self.scratch, n1);
-                            // The \ prior to this byte started an escape sequence,
-                            // so we need to parse that now. This recursive call
-                            // does not blow the stack on malicious input because
-                            // the escape is not \u, so it will be handled by one
-                            // of the easy nonrecursive cases.
-                            return self.parse_escape();
-                        }
-
-                        let n2 = self.decode_hex_escape()?;
-
-                        #[allow(clippy::manual_range_contains)]
-                        if n2 < 0xDC00 || n2 > 0xDFFF {
-                            return Err(self.custom("lone leading surrogate in hex escape"));
-                        }
-
-                        let n = (((n1 - 0xD800) as u32) << 10 | (n2 - 0xDC00) as u32) + 0x1_0000;
-
-                        match char::from_u32(n) {
-                            Some(c) => c,
-                            None => return Err(self.custom("invalid unicode codepoint")),
-                        }
-                    }
-
-                    // Every u16 outside of the surrogate ranges above is guaranteed
-                    // to be a legal char.
-                    n => char::from_u32(n as u32).unwrap(),
-                };
-
-                self.scratch
-                    .extend_from_slice(c.encode_utf8(&mut [0_u8; 4]).as_bytes());
-            }
+            b'u' => self.parse_unicode_escape()?,
             _ => {
                 return Err(self.custom("invalid escape"));
             }
@@ -578,24 +515,86 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    fn decode_hex_escape(&mut self) -> Result<u16, Error<'a>> {
-        if self.index + 4 > self.input.len() {
-            self.index = self.input.len();
-            return Err(self.end_of_input());
+    fn parse_unicode_escape(&mut self) -> Result<(), Error<'a>> {
+        let mut n = self.decode_hex_escape()?;
+
+        // Non-BMP characters are encoded as a sequence of two hex escapes,
+        // representing UTF-16 surrogates. If deserializing a utf-8 string the
+        // surrogates are required to be paired, whereas deserializing a byte string
+        // accepts lone surrogates.
+        if self.validate_unicode && (0xDC00..=0xDFFF).contains(&n) {
+            return Err(self.unexpected());
         }
 
-        let mut n = 0;
-        for _ in 0..4 {
-            let ch = decode_hex_val(self.input[self.index]);
-            self.index += 1;
-            match ch {
-                None => return Err(self.custom("invalid escape")),
-                Some(val) => {
-                    n = (n << 4) + val;
+        loop {
+            if !(0xD800..=0xDBFF).contains(&n) {
+                // Every u16 outside of the surrogate ranges is guaranteed to be a
+                // legal char.
+                push_wtf8_codepoint(n as u32, &mut self.scratch);
+                return Ok(());
+            }
+
+            // n is a leading surrogate, we now expect a trailing surrogate.
+            let n1 = n;
+
+            if self.peek_or_eof()? == b'\\' {
+                self.index += 1;
+            } else if self.validate_unicode {
+                self.index += 1;
+                return Err(self.unexpected());
+            } else {
+                push_wtf8_codepoint(n1 as u32, &mut self.scratch);
+                return Ok(());
+            }
+
+            if self.peek_or_eof()? == b'u' {
+                self.index += 1;
+            } else if self.validate_unicode {
+                self.index += 1;
+                return Err(self.unexpected());
+            } else {
+                push_wtf8_codepoint(n1 as u32, &mut self.scratch);
+                // The \ prior to this byte started an escape sequence, so we
+                // need to parse that now. This recursive call does not blow the
+                // stack on malicious input because the escape is not \u, so it
+                // will be handled by one of the easy nonrecursive cases.
+                return self.parse_escape();
+            }
+
+            let n2 = self.decode_hex_escape()?;
+
+            if !(0xDC00..=0xDFFF).contains(&n2) {
+                if self.validate_unicode {
+                    return Err(self.unexpected());
+                }
+                push_wtf8_codepoint(n1 as u32, &mut self.scratch);
+                // If n2 is a leading surrogate, we need to restart.
+                n = n2;
+                continue;
+            }
+
+            // This value is in range U+10000..=U+10FFFF, which is always a valid
+            // codepoint.
+            let n = (((n1 - 0xD800) as u32) << 10 | (n2 - 0xDC00) as u32) + 0x1_0000;
+            push_wtf8_codepoint(n, &mut self.scratch);
+            return Ok(());
+        }
+    }
+
+    fn decode_hex_escape(&mut self) -> Result<u16, Error<'a>> {
+        match self.input[self.index..] {
+            [a, b, c, d, ..] => {
+                self.index += 4;
+                match decode_four_hex_digits(a, b, c, d) {
+                    Some(val) => Ok(val),
+                    None => Err(self.custom("invalid hex escape")),
                 }
             }
+            _ => {
+                self.index = self.input.len();
+                Err(self.end_of_input())
+            }
         }
-        Ok(n)
     }
 
     #[cold]
@@ -628,84 +627,86 @@ impl<'a> Decoder<'a> {
     }
 }
 
-static HEX: [u8; 256] = {
-    const __: u8 = 255; // not a hex digit
-    #[allow(clippy::zero_prefixed_literal)]
-    [
-        //   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 0
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 1
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 2
-        00, 01, 02, 03, 04, 05, 06, 07, 08, 09, __, __, __, __, __, __, // 3
-        __, 10, 11, 12, 13, 14, 15, __, __, __, __, __, __, __, __, __, // 4
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 5
-        __, 10, 11, 12, 13, 14, 15, __, __, __, __, __, __, __, __, __, // 6
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 7
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 8
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 9
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // A
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // B
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // C
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // D
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // E
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // F
-    ]
-};
+fn is_escape(ch: u8, including_control_characters: bool) -> bool {
+    ch == b'"' || ch == b'\\' || (including_control_characters && ch < 0x20)
+}
 
-fn decode_hex_val(val: u8) -> Option<u16> {
-    let n = HEX[val as usize] as u16;
-    if n == 255 {
-        None
-    } else {
-        Some(n)
+#[inline]
+fn push_wtf8_codepoint(n: u32, scratch: &mut Vec<u8>) {
+    if n < 0x80 {
+        scratch.push(n as u8);
+        return;
+    }
+
+    scratch.reserve(4);
+
+    unsafe {
+        let ptr = scratch.as_mut_ptr().add(scratch.len());
+
+        let encoded_len = match n {
+            0..=0x7F => unreachable!(),
+            0x80..=0x7FF => {
+                ptr.write((n >> 6 & 0b0001_1111) as u8 | 0b1100_0000);
+                2
+            }
+            0x800..=0xFFFF => {
+                ptr.write((n >> 12 & 0b0000_1111) as u8 | 0b1110_0000);
+                ptr.add(1).write((n >> 6 & 0b0011_1111) as u8 | 0b1000_0000);
+                3
+            }
+            0x1_0000..=0x10_FFFF => {
+                ptr.write((n >> 18 & 0b0000_0111) as u8 | 0b1111_0000);
+                ptr.add(1)
+                    .write((n >> 12 & 0b0011_1111) as u8 | 0b1000_0000);
+                ptr.add(2).write((n >> 6 & 0b0011_1111) as u8 | 0b1000_0000);
+                4
+            }
+            0x11_0000.. => unreachable!(),
+        };
+        ptr.add(encoded_len - 1)
+            .write((n & 0b0011_1111) as u8 | 0b1000_0000);
+
+        scratch.set_len(scratch.len() + encoded_len);
     }
 }
 
-// Lookup table of bytes that must be escaped. A value of true at index i means
-// that byte i requires an escape sequence in the input.
-static ESCAPE: [bool; 256] = {
-    const CT: bool = true; // control character \x00..=\x1F
-    const QU: bool = true; // quote \x22
-    const BS: bool = true; // backslash \x5C
-    const __: bool = false; // allow unescaped
-    [
-        //   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
-        CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, // 0
-        CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, // 1
-        __, __, QU, __, __, __, __, __, __, __, __, __, __, __, __, __, // 2
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 3
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 4
-        __, __, __, __, __, __, __, __, __, __, __, __, BS, __, __, __, // 5
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 6
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 7
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 8
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 9
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // A
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // B
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // C
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // D
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // E
-        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // F
-    ]
-};
+const fn decode_hex_val_slow(val: u8) -> Option<u8> {
+    match val {
+        b'0'..=b'9' => Some(val - b'0'),
+        b'A'..=b'F' => Some(val - b'A' + 10),
+        b'a'..=b'f' => Some(val - b'a' + 10),
+        _ => None,
+    }
+}
 
-// https://tools.ietf.org/html/rfc3629
-const UTF8_CHAR_WIDTH: &[u8; 256] = &[
-    // 1  2  3  4  5  6  7  8  9  A  B  C  D  E  F
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 0
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 1
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 2
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 3
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 4
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 5
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 6
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 7
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 8
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 9
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // A
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // B
-    0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, // C
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, // D
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, // E
-    4, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // F
-];
+const fn build_hex_table(shift: usize) -> [i16; 256] {
+    let mut table = [0; 256];
+    let mut ch = 0;
+    while ch < 256 {
+        table[ch] = match decode_hex_val_slow(ch as u8) {
+            Some(val) => (val as i16) << shift,
+            None => -1,
+        };
+        ch += 1;
+    }
+    table
+}
+
+static HEX0: [i16; 256] = build_hex_table(0);
+static HEX1: [i16; 256] = build_hex_table(4);
+
+fn decode_four_hex_digits(a: u8, b: u8, c: u8, d: u8) -> Option<u16> {
+    let a = HEX1[a as usize] as i32;
+    let b = HEX0[b as usize] as i32;
+    let c = HEX1[c as usize] as i32;
+    let d = HEX0[d as usize] as i32;
+
+    let codepoint = ((a | b) << 8) | c | d;
+
+    // A single sign bit check.
+    if codepoint >= 0 {
+        Some(codepoint as u16)
+    } else {
+        None
+    }
+}

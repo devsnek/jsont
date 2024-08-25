@@ -6,7 +6,7 @@ use std::io::Write;
 mod decoder;
 mod encoder;
 
-rustler::init!("Elixir.Jsont.NifBridge", [encode, decode]);
+rustler::init!("Elixir.Jsont.NifBridge");
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn encode<'a>(

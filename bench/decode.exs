@@ -51,6 +51,5 @@ Benchee.run(decode_jobs,
   load: "output/runs/*.benchee",
   formatters: [
     {Benchee.Formatters.HTML, file: Path.expand("output/decode.html", __DIR__)},
-    Benchee.Formatters.Console
   ]
 )

@@ -40,6 +40,5 @@ Benchee.run(encode_jobs,
     end,
   formatters: [
     {Benchee.Formatters.HTML, file: Path.expand("output/encode.html", __DIR__)},
-    Benchee.Formatters.Console
   ]
 )
