@@ -10,13 +10,20 @@ jobs:
     name: OTP ${{matrix.otp}} / Elixir ${{matrix.elixir}}
     strategy:
       matrix:
-        otp: ['24', '25', '28']
-        elixir: ['1.15', '1.18', '1.19']
+        config:
+          - otp: 24
+            elixir: 1.15
+          - otp: 25
+            elixir: 1.15
+          - otp: 25
+            elixir: 1.18
+          - otp: 28
+            elixir: 1.19
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: ${{matrix.otp}}
-          elixir-version: ${{matrix.elixir}}
+          otp-version: ${{matrix.config.otp}}
+          elixir-version: ${{matrix.config.elixir}}
       - run: mix deps.get
       - run: mix test
