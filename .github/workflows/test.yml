@@ -1,4 +1,8 @@
-on: push
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
   test:
@@ -6,8 +10,8 @@ jobs:
     name: OTP ${{matrix.otp}} / Elixir ${{matrix.elixir}}
     strategy:
       matrix:
-        otp: ['24', '25', '26']
-        elixir: ['1.15.7', '1.16.1']
+        otp: ['24', '25', '28']
+        elixir: ['1.15.5', '1.18.4', '1.19.2']
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
