@@ -9,10 +9,26 @@ defmodule Jsont do
     Jsont.NifBridge.encode(value, bigint_as_string, strip_elixir_struct)
   end
 
+  defp iolist_to_binary(value) do
+    try do
+      value = :erlang.iolist_to_binary(value)
+      {:ok, value}
+    rescue
+      _ ->
+        {:error, :badarg}
+    end
+  end
+
   @spec decode(iodata()) :: {:ok, term()} | {:error, any()}
   def decode(value, opts \\ []) do
     validate_unicode = opts[:validate_unicode] || false
-    value = :erlang.iolist_to_binary(value)
-    Jsont.NifBridge.decode(value, validate_unicode)
+
+    case iolist_to_binary(value) do
+      {:ok, value} ->
+        Jsont.NifBridge.decode(value, validate_unicode)
+
+      e ->
+        e
+    end
   end
 end

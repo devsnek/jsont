@@ -130,7 +130,13 @@ defmodule Jsont.DecodeTest do
     expected = [1, 2, 3, 4]
     assert parse!(body) == expected
 
-    assert parse!([~s({ "a": "hi" })]) == %{ "a" => "hi" }
+    assert parse!([~s({ "a": "hi" })]) == %{"a" => "hi"}
+  end
+
+  test "badarg" do
+    {:error, :badarg} = Jsont.decode(1)
+    {:error, :badarg} = Jsont.decode(1.5)
+    {:error, :badarg} = Jsont.decode(%{"a" => "hi"})
   end
 
   describe "Bench Fixtures" do
