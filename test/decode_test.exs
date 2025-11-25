@@ -129,6 +129,8 @@ defmodule Jsont.DecodeTest do
     body = String.split(~s([1,2,3,4]), "")
     expected = [1, 2, 3, 4]
     assert parse!(body) == expected
+
+    assert parse!([~s({ "a": "hi" })]) == %{ "a" => "hi" }
   end
 
   describe "Bench Fixtures" do

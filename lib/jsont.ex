@@ -12,6 +12,7 @@ defmodule Jsont do
   @spec decode(iodata()) :: {:ok, term()} | {:error, any()}
   def decode(value, opts \\ []) do
     validate_unicode = opts[:validate_unicode] || false
+    value = :erlang.iolist_to_binary(value)
     Jsont.NifBridge.decode(value, validate_unicode)
   end
 end

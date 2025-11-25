@@ -30,7 +30,7 @@ fn encode<'a>(
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn decode<'a>(env: Env<'a>, term: Term<'a>, validate_unicode: bool) -> (Atom, Term<'a>) {
-    let binary = match Binary::from_iolist(term) {
+    let binary = match Binary::from_term(term) {
         Ok(binary) => binary,
         Err(e) => {
             return (atom::error(), encode_error(env, Error::Rustler(e)));
